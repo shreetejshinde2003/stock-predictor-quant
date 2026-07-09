@@ -1,224 +1,200 @@
-import sqlite3
-import pandas as pd
-import numpy as np
 import os
 import json
+import time
+import argparse
 import datetime
-import gspread
+import pytz
+import pandas as pd
+import numpy as np
 import yfinance as yf
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from tslearn.metrics import dtw
 
-# ==============================================================================
-# PIPELINE CONFIGURATION
-# ==============================================================================
-TARGET_TICKER = "RELIANCE.NS"         # The target asset we want to scan today
-GOOGLE_SHEET_NAME = "gemini stock experiment"  # MUST match your exact Google Sheet name
-CREDENTIALS_FILE = "google_credentials.json"   # Your secure cloud access key
-DB_NAME = "market_memory.db"          # Local offline statistical memory file
+# --- CONFIGURATION LABELS ---
 
-# ==============================================================================
-# PHASE 1: FRESH LIVE PROFILE FETCH & FEATURE ENGINEERING
-# ==============================================================================
-def calculate_live_target_shape(ticker_symbol):
-    """Downloads fresh data at market open and computes the 14-day Z-Score geometry."""
-    print(f"⚡ Downloading last 45 days of live data for {ticker_symbol}...")
-    live_df = yf.download(ticker_symbol, period="45d", progress=False)
-    
-    if live_df.empty:
-        raise ValueError(f"❌ Failed to fetch live data for {ticker_symbol}. Check ticker symbol.")
-        
-    if isinstance(live_df.columns, pd.MultiIndex):
-        live_df.columns = live_df.columns.get_level_values(0)
-    live_df.columns = [col.lower() for col in live_df.columns]
-    
-    live_df = live_df.sort_index()
-    
-    rolling_mean = live_df['close'].rolling(window=14).mean()
-    rolling_std = live_df['close'].rolling(window=14).std()
-    live_df['z_score'] = (live_df['close'] - rolling_mean) / rolling_std
-    
-    clean_series = live_df['z_score'].dropna().values
-    
-    if len(clean_series) < 14:
-        raise ValueError("❌ Insufficient data history available to calculate a complete 14-day structural profile.")
-        
-    todays_live_shape = clean_series[-14:]
-    current_market_price = float(live_df['close'].iloc[-1])
-    
-    return todays_live_shape, current_market_price
+NIFTY_TICKERS = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "BHARTIARTL.NS",
+    "SBIN.NS", "INFY.NS", "ITC.NS", "HINDUNILVR.NS", "LT.NS",
+    "BAJFINANCE.NS", "HCLTECH.NS", "MARUTI.NS", "SUNPHARMA.NS", "ADANIENT.NS",
+    "KOTAKBANK.NS", "TITAN.NS", "ONGC.NS", "TATAMOTORS.NS", "NTPC.NS",
+    "AXISBANK.NS", "ADANIPORTS.NS", "ULTRACEMCO.NS", "ASIANPAINT.NS", "COALINDIA.NS",
+    "BAJAJFINSV.NS", "BAJAJ-AUTO.NS", "POWERGRID.NS", "NESTLEIND.NS", "WIPRO.NS",
+    "M&M.NS", "IOC.NS", "HAL.NS", "DLF.NS", "ADANIGREEN.NS",
+    "TATASTEEL.NS", "SIEMENS.NS", "VBL.NS", "ZOMATO.NS", "PIDILITIND.NS",
+    "GRASIM.NS", "SBILIFE.NS", "BEL.NS", "LTIM.NS", "TRENT.NS",
+    "INDUSINDBK.NS", "HINDALCO.NS", "BRITANNIA.NS", "TECHM.NS", "EICHERMOT.NS"
+]
+GRAVEYARD_TICKERS = ["YESBANK.NS", "IDEA.NS", "SUZLON.NS"]
 
-# ==============================================================================
-# PHASE 2: MEMORY-SAFE TWO-PASS DTW CHAOS SEARCH ENGINE
-# ==============================================================================
-def optimized_two_pass_search(conn, todays_live_shape):
-    """Executes O(N) fast Euclidean pre-filter, then targets heavy DTW computation on top 500 nodes."""
-    print("🧠 Fetching 15-year historical memory chunks from database...")
-    df = pd.read_sql_query("SELECT * FROM master_market_geometry ORDER BY stock_id, date", conn)
-    
-    candidates = []
-    grouped = df.groupby('stock_id')
-    
-    for stock_id, group in grouped:
-        z_scores = group['price_z_score'].values
-        dates = group['date'].values
+# --- LAYER 1: TIME GATEKEEPER & LOCAL BYPASS ---
+def is_market_open_today():
+    if os.getenv("LOCAL_QUANT_TEST") == "TRUE":
+        print("🛠️ LOCAL TESTING MODE: Bypassing Calendar Gatekeeper.")
+        return True
+
+    ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.datetime.now(ist).date()
+    if today.weekday() >= 5: return False
         
-        for i in range(0, len(z_scores) - 13, 3):
-            window = z_scores[i:i+14]
-            if len(window) == 14:
-                base_distance = np.sum(np.abs(window - todays_live_shape))
-                candidates.append({
-                    'stock_id': stock_id,
-                    'date': dates[i+13],
-                    'window': window,
-                    'fast_dist': base_distance
-                })
+    nse_holidays = [datetime.date(2026, 8, 15), datetime.date(2026, 10, 2), datetime.date(2026, 11, 8)]
+    if today in nse_holidays: return False
+    return True
+
+# --- LAYER 2: ARMORED IN-MEMORY FETCH ---
+def fetch_in_memory_data(tickers, period="5y"):
+    df_list = []
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+
+    for ticker in tickers:
+        success = False
+        for attempt in range(3):
+            try:
+                data = yf.download(ticker, period=period, session=session, timeout=10, progress=False, auto_adjust=True)
+                if data.empty or len(data) < 100:
+                    raise ValueError("Insufficient rows returned from API.")
                 
-    if not candidates:
-        raise ValueError("❌ Memory extraction sequence produced zero structural candidates. Check master_market_geometry table.")
-        
-    candidate_df = pd.DataFrame(candidates).sort_values('fast_dist').head(500)
-    
-    print(f"🛡️ Memory Guard Active: Computing precise DTW matches over the best {len(candidate_df)} targets...")
-    dtw_results = []
-    for _, row in candidate_df.iterrows():
-        dtw_dist = dtw(todays_live_shape, row['window'])
-        dtw_results.append({
-            'stock_id': row['stock_id'],
-            'date': row['date'],
-            'dtw_distance': dtw_dist
-        })
-        
-    final_matches = pd.DataFrame(dtw_results).sort_values('dtw_distance').head(10)
-    return final_matches
+                # FIX: Flatten MultiIndex columns if present in newer yfinance versions
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+                
+                data = data.dropna()
+                vol_col = 'Volume' if 'Volume' in data else 'volume'
+                
+                rolling_vol = data[vol_col].rolling(window=10).mean()
+                data = data[data[vol_col] >= (rolling_vol * 0.20)]
+                
+                data['ticker'] = ticker
+                df_list.append(data)
+                success = True
+                break
+            except Exception as e:
+                print(f"⚠️ Attempt {attempt+1} failed for {ticker}: {e}")
+                time.sleep(2 ** attempt)
+        if not success:
+            print(f"🚨 Circuit Breaker: Quarantined {ticker}")
+            
+    return pd.concat(df_list) if df_list else pd.DataFrame()
 
-# ==============================================================================
-# PHASE 3: PROBABILITY MATRIX EVALUATOR
-# ==============================================================================
-def evaluate_probability_matrix(conn, matches, target_gain=0.02, stop_loss=0.01):
-    """Analyzes forward data paths for matches to build probability matrices."""
-    outcomes = []
+# --- AUXILIARY: GEOMETRY EXTRACTION ---
+def extract_current_shape(df, ticker, days=14):
+    ticker_df = df[df['ticker'] == ticker].tail(days)
+    close_col = 'Close' if 'Close' in ticker_df else 'close'
+    if len(ticker_df) < days: return np.zeros((days, 1))
     
-    for _, row in matches.iterrows():
-        table = row['stock_id']
-        match_date = row['date']
+    prices = ticker_df[close_col].values.flatten()
+    z_scores = (prices - np.mean(prices)) / (np.std(prices) + 1e-9)
+    return z_scores.reshape(-1, 1)
+
+# --- LAYER 3: MORNING HUNTER ---
+def run_morning_hunter():
+    print("Executing Morning Scan...")
+    if not is_market_open_today(): return
         
-        query = f"SELECT date, close FROM [{table}] WHERE date >= '{match_date}' ORDER BY date ASC LIMIT 4"
+    nifty_df = fetch_in_memory_data(NIFTY_TICKERS)
+    if nifty_df.empty:
+        print("🚨 CRITICAL: Master DataFrame is completely empty. Fetching failed.")
+        return
+    
+    if os.path.exists("lesson_ledger.json"):
+        with open("lesson_ledger.json", "r") as f: memories = json.load(f)
+    else: memories = {"toxic_shapes": [], "stagnation_shapes": []}
+        
+    signals_output = []
+    close_col = 'Close' if 'Close' in nifty_df else 'close'
+    
+    for ticker in NIFTY_TICKERS:
         try:
-            price_data = pd.read_sql_query(query, conn)
-        except Exception:
-            continue
-        
-        if len(price_data) == 4:
-            entry_price = float(price_data['close'].iloc[0])
-            future_prices = price_data['close'].iloc[1:4].astype(float).values
+            today_shape = extract_current_shape(nifty_df, ticker)
             
-            percentage_moves = (future_prices - entry_price) / entry_price
-            max_move = np.max(percentage_moves)
-            min_move = np.min(percentage_moves)
-            final_move = percentage_moves[-1]
-            
-            if min_move <= -stop_loss and max_move < target_gain:
-                success = 0  
-            elif max_move >= target_gain:
-                success = 1  
-            else:
-                success = 1 if final_move > 0 else 0  
+            # Filter rows for this specific stock
+            ticker_rows = nifty_df[nifty_df['ticker'] == ticker]
+            if ticker_rows.empty:
+                print(f"❌ Missing filtered data row for {ticker}")
+                continue
                 
-            outcomes.append({'return': final_move, 'success': success})
+            current_price = float(ticker_rows[close_col].iloc[-1])
             
-    if not outcomes:
-        return {"Trade_Signal": "HOLD (DATA SHORTAGE)", "Probability": "0%", "Expected_Return": "0.00%"}
-        
-    total = len(outcomes)
-    wins = sum([t['success'] for t in outcomes])
-    avg_ret = np.mean([t['return'] for t in outcomes])
-    win_rate = (wins / total) * 100
-    
-    signal = "BUY" if win_rate >= 60 else "SELL" if win_rate <= 40 else "HOLD (STAGNANT)"
-    
-    return {
-        "Trade_Signal": signal,
-        "Probability": f"{win_rate:.1f}%",
-        "Expected_Return": f"{avg_ret * 100:.2f}%"
-    }
+            verdict = "BUY"
+            reason = "Clean Algorithmic Setup"
+            
+            # Cognitive Feedback Check
+            for toxic in memories["toxic_shapes"]:
+                if dtw(today_shape, np.array(toxic)) < 0.35:
+                    verdict, reason = "REJECTED", "Matches past Stop-Loss trauma."
+            for trap in memories["stagnation_shapes"]:
+                if dtw(today_shape, np.array(trap)) < 0.35:
+                    verdict, reason = "REJECTED", "Matches past Stagnation capital trap."
+            
+            signals_output.append({
+                "date": str(datetime.date.today()),
+                "ticker": ticker,
+                "entry_price": round(current_price, 2),
+                "target": round(current_price * 1.05, 2),
+                "stop_loss": round(current_price * 0.97, 2),
+                "verdict": verdict,
+                "reason": reason,
+                "shape": today_shape.flatten().tolist()
+            })
+            print(f"🎯 Successfully processed {ticker} at ₹{round(current_price, 2)}")
+            
+        except Exception as e:
+            # UNMASKED ERROR: Let the console tell us exactly why it failed
+            print(f"❌ Failed processing loop for {ticker}. Error details: {e}")
+            
+    with open("signals.json", "w") as f: json.dump(signals_output, f, indent=4)
+    print(f"✅ Processing complete. Generated {len(signals_output)} signals inside signals.json.")
 
-# ==============================================================================
-# PHASE 4: AUTOMATED GOOGLE SHEET UPDATE ENGINE (PRODUCTION DECOUPLED)
-# ==============================================================================
-def write_output_to_google_sheet(live_price, matrix_results):
-    """Pushes runtime predictions into your Google Sheet layout automatically via gspread API."""
-    if not os.path.exists(CREDENTIALS_FILE):
-        print(f"⚠️ Skipping Sheet Update: '{CREDENTIALS_FILE}' missing inside the folder path.")
-        return
-
-    print("🚀 Pushing calculations directly into your Google Sheet layout...")
-    
-    try:
-        gc = gspread.service_account(filename=CREDENTIALS_FILE)
-        sh = gc.open(GOOGLE_SHEET_NAME)
-        worksheet = sh.get_worksheet(0) 
+# --- LAYER 4: EVENING AUDITOR ---
+def run_evening_auditor():
+    print("Executing Evening Audit Analysis...")
+    if not is_market_open_today() or not os.path.exists("signals.json"): return
         
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
+    with open("signals.json", "r") as f: active_trades = json.load(f)
+    if os.path.exists("lesson_ledger.json"):
+        with open("lesson_ledger.json", "r") as f: memories = json.load(f)
+    else: memories = {"toxic_shapes": [], "stagnation_shapes": []}
         
-        row_payload = [
-            TARGET_TICKER, 
-            today_str, 
-            float(live_price), 
-            matrix_results["Trade_Signal"], 
-            matrix_results["Probability"], 
-            matrix_results["Expected_Return"], 
-            "ACTIVE EVALUATION"
-        ]
+    for trade in active_trades:
+        if trade["verdict"] == "REJECTED": continue
+        ticker = trade["ticker"]
+        try:
+            live_close = float(yf.Ticker(ticker).fast_info['lastPrice'])
+            if live_close < (trade["entry_price"] * 0.50):
+                print(f"⚠️ DANGER: {ticker} price seems corrupted. Skipping.")
+                continue
+        except Exception as e:
+            print(f"❌ Auditor could not fetch instant spot price for {ticker}: {e}")
+            continue
+            
+        try:
+            trade_runway = yf.download(ticker, start=trade["date"], progress=False)
+            if isinstance(trade_runway.columns, pd.MultiIndex):
+                trade_runway.columns = trade_runway.columns.get_level_values(0)
+            trading_sessions = len(trade_runway)
+        except: trading_sessions = 0
         
-        worksheet.append_row(row_payload)
-        print("🎉 Google Sheet successfully appended and locked by Python!")
-        
-    except Exception as api_error:
-        # Check if the error string is just Google's valid HTTP 200 message mask
-        error_msg = str(api_error)
-        if "200" in error_msg or "Response" in error_msg:
-            print("🎉 Google Sheet successfully appended and locked by Python! (Bypassed False-Alarm Warning)")
-        else:
-            print(f"❌ Actual Google Sheets API Connection Error Encountered: {api_error}")
-
-# ==============================================================================
-# MAIN ENGINE EXECUTION CONTEXT
-# ==============================================================================
-def main():
-    print("==================================================================")
-    print(f"🔥 MASTER ALGOTHINK COGNITIVE PIPELINE INITIALISED: {TARGET_TICKER} 🔥")
-    print("==================================================================")
-    
-    try:
-        todays_shape, current_price = calculate_live_target_shape(TARGET_TICKER)
-        print(f"Calculated Live 14-Day Trajectory Profile for {TARGET_TICKER} successfully.")
-        print(f"Current Market Spot Price: ₹{current_price:,.2f}\n")
-    except Exception as e:
-        print(f"❌ Target shape step failed: {e}")
-        return
-        
-    if not os.path.exists(DB_NAME):
-        print(f"❌ Error: Database '{DB_NAME}' missing.")
-        return
-    conn = sqlite3.connect(DB_NAME)
-    
-    try:
-        top_matches = optimized_two_pass_search(conn, todays_shape)
-        print(f"\nTop matches successfully compiled.")
-    except Exception as e:
-        print(f"❌ Pattern matching step failed: {e}")
-        conn.close()
-        return
-        
-    matrix_output = evaluate_probability_matrix(conn, top_matches)
-    conn.close()
-    
-    print("\n--- FINAL PIPELINE ANALYTICAL LOG OUTPUT ---")
-    print(json.dumps(matrix_output, indent=4))
-    print("==================================================================")
-    
-    write_output_to_google_sheet(current_price, matrix_output)
-    print("\n🏁 Master Execution Sequence Terminal Closed Cleanly.")
+        if live_close <= trade["stop_loss"]:
+            memories["toxic_shapes"].append(trade["shape"])
+            trade["verdict"] = "CLOSED (LOSS)"
+        elif live_close >= trade["target"]:
+            trade["verdict"] = "CLOSED (WIN)"
+        elif trading_sessions >= 4:
+            memories["stagnation_shapes"].append(trade["shape"])
+            trade["verdict"] = "CLOSED (TIME STOP)"
+            
+    with open("lesson_ledger.json", "w") as f: json.dump(memories, f, indent=4)
+    with open("signals.json", "w") as f: json.dump(active_trades, f, indent=4)
+    print("✅ Evening audit complete. Memory updated.")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', required=True, choices=['hunt', 'audit'])
+    args = parser.parse_args()
+    
+    if args.mode == 'hunt': run_morning_hunter()
+    elif args.mode == 'audit': run_evening_auditor()
