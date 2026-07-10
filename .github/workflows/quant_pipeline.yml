@@ -33,7 +33,14 @@ jobs:
       - name: Run Production Pipeline
         env:
           TZ: Asia/Kolkata
-        run: python production_pipeline.py
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python production_pipeline.py --mode hunt
+          elif [ "${{ github.event.schedule }}" = "15 3 * * 1-5" ]; then
+            python production_pipeline.py --mode hunt
+          elif [ "${{ github.event.schedule }}" = "15 10 * * 1-5" ]; then
+            python production_pipeline.py --mode audit
+          fi
 
       - name: Commit and Push JSON Memory
         run: |
