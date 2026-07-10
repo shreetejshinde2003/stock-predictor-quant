@@ -1,48 +1,39 @@
-name: Quant Prediction Engine Brain
+name: Master Autonomous Pipeline
 
 on:
   schedule:
-    # 03:15 UTC corresponds to exactly 8:45 AM Indian Standard Time (IST)
-    - cron: '15 3 * * 1-5'
-  workflow_dispatch: # Allows you to manually click a button to run it anytime
+    # 8:45 AM IST = 3:15 AM UTC (Monday to Friday)
+    - cron: '45 3 * * 1-5'
+    # 3:45 PM IST = 10:15 AM UTC (Monday to Friday)
+    - cron: '45 10 * * 1-5'
+  workflow_dispatch: # This adds a manual "Play" button so we can test it now
+
+permissions:
+  contents: write # CRITICAL: Allows the bot to save JSON memory back to the repo
 
 jobs:
-  run-pipeline:
+  run-chaos-engine:
     runs-on: ubuntu-latest
-
     steps:
-    # 1. Spin up a clean Linux Virtual Machine container environment
-    - name: Checkout Repository Code
-      uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-    # 2. Deploy Python version 3.13 onto the server
-    - name: Set Up Python 3.13
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-        cache: 'pip' # Speeds up future daily automated script run pipelines
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-    # 3. Inject all necessary computing packages smoothly 
-    - name: Install Quant Core Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install yfinance pandas numpy tslearn scikit-learn scipy gspread google-auth
+      - name: Install Dependencies
+        run: |
+          pip install pandas yfinance numpy ta
 
-    # 4. Reconstruct your secure Google cloud credentials on the cloud fly
-    - name: De-serialize Google API Credentials Key File
-      run: |
-        echo "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > google_credentials.json
+      - name: Run Production Pipeline
+        run: python production_pipeline.py
 
-    # 5. Ignite your integrated Case-Based Reasoning Chaos Scanner Engine
-    - name: Execute Live Production Pipeline
-      run: |
-        python production_pipeline.py
-
-    # 6. Commit the updated database memory back to GitHub safely
-    - name: Push Market Memory Updates Back to Repository
-      run: |
-        git config --global user.name "Quant Engine Automation"
-        git config --global user.email "actions@github.com"
-        git add market_memory.db
-        git diff-index --quiet HEAD || git commit -m "Automated Sync: 15-Year Market Memory Matrix Cache [Skip CI]"
-        git push
+      - name: Commit and Push JSON Memory
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add signals.json lesson_ledger.json
+          git diff --quiet && git diff --staged --quiet || git commit -m "🤖 Auto-update: Morning/Evening AI Engine Scan"
+          git push
