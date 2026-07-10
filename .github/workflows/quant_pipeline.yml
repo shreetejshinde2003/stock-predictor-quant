@@ -2,38 +2,52 @@ name: Master Autonomous Pipeline
 
 on:
   schedule:
-    # 8:45 AM IST = 3:15 AM UTC (Monday to Friday)
-    - cron: '45 3 * * 1-5'
-    # 3:45 PM IST = 10:15 AM UTC (Monday to Friday)
-    - cron: '45 10 * * 1-5'
-  workflow_dispatch: # This adds a manual "Play" button so we can test it now
+    - cron: '15 3 * * 1-5'
+    - cron: '15 10 * * 1-5'
+
+  workflow_dispatch:
 
 permissions:
-  contents: write # CRITICAL: Allows the bot to save JSON memory back to the repo
+  contents: write
 
 jobs:
   run-chaos-engine:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install Dependencies
         run: |
-          pip install pandas yfinance numpy ta
+          python -m pip install --upgrade pip
+          python -m pip install pandas numpy yfinance tslearn scipy requests pytz ta streamlit
 
       - name: Run Production Pipeline
+        env:
+          TZ: Asia/Kolkata
         run: python production_pipeline.py
 
       - name: Commit and Push JSON Memory
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          touch signals.json lesson_ledger.json
+
           git add signals.json lesson_ledger.json
-          git diff --quiet && git diff --staged --quiet || git commit -m "🤖 Auto-update: Morning/Evening AI Engine Scan"
-          git push
+
+          if git diff --staged --quiet; then
+            echo "No market-memory changes detected."
+          else
+            git commit -m "🤖 Auto-update: Morning/Evening AI Engine Scan"
+            git pull --rebase origin main
+            git push origin main
+          fi
