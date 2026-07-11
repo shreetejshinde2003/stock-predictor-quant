@@ -43,7 +43,7 @@ jobs:
             python production_pipeline.py --mode audit
           fi
 
-      - name: Commit and Push JSON Memory
+      - name: Commit and Push Research Data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -55,7 +55,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No market-memory changes detected."
           else
-            git commit -m "🤖 Auto-update: Morning/Evening AI Engine Scan"
+            git commit -m "📊 Auto-update: Algothink research data"
             git pull --rebase origin main
             git push origin main
           fi
