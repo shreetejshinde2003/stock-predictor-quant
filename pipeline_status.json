@@ -1,0 +1,12 @@
+{
+  "status": "FAILED",
+  "mode": "hunt",
+  "signals_published": false,
+  "previous_signals_preserved": false,
+  "reason": "Market-data retrieval failed for configured ticker symbols",
+  "failed_symbols": [
+    "TATAMOTORS.NS",
+    "ZOMATO.NS"
+  ],
+  "requires_pipeline_hardening": true
+}
