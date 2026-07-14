@@ -101,9 +101,21 @@ def run_morning_hunter():
         return
     
     if os.path.exists("lesson_ledger.json"):
-        with open("lesson_ledger.json", "r") as f: memories = json.load(f)
-    else: memories = {"toxic_shapes": [], "stagnation_shapes": []}
-        
+        try:
+            with open("lesson_ledger.json", "r") as f:
+                memories = json.load(f)
+
+            if not isinstance(memories, dict):
+                memories = {}
+
+        except (json.JSONDecodeError, OSError):
+            memories = {}
+    else:
+        memories = {}
+
+    memories.setdefault("toxic_shapes", [])
+    memories.setdefault("stagnation_shapes", [])
+
     signals_output = []
     close_col = 'Close' if 'Close' in nifty_df else 'close'
     
