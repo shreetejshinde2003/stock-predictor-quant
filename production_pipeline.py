@@ -146,21 +146,21 @@ def run_morning_hunter():
             # UNMASKED ERROR: Let the console tell us exactly why it failed
             print(f"❌ Failed processing loop for {ticker}. Error details: {e}")
             
-   if not signals_output:
-    print("🚨 HUNT FAILED: Zero valid signals were generated.")
-    print("🛡️ Existing signals.json has been preserved.")
-    raise RuntimeError(
-        "Morning Hunt generated zero valid signals. "
-        "Refusing to overwrite the previous signal data."
+       if not signals_output:
+        print("🚨 HUNT FAILED: Zero valid signals were generated.")
+        print("🛡️ Existing signals.json has been preserved.")
+        raise RuntimeError(
+            "Morning Hunt generated zero valid signals. "
+            "Refusing to overwrite the previous signal data."
+        )
+
+    with open("signals.json", "w") as f:
+        json.dump(signals_output, f, indent=4)
+
+    print(
+        f"✅ Processing complete. "
+        f"Generated {len(signals_output)} signals inside signals.json."
     )
-
-with open("signals.json", "w") as f:
-    json.dump(signals_output, f, indent=4)
-
-print(
-    f"✅ Processing complete. "
-    f"Generated {len(signals_output)} signals inside signals.json."
-)
 
 # --- LAYER 4: EVENING AUDITOR ---
 def run_evening_auditor():
