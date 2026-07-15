@@ -177,13 +177,26 @@ def run_morning_hunter():
 # --- LAYER 4: EVENING AUDITOR ---
 def run_evening_auditor():
     print("Executing Evening Audit Analysis...")
-    if not is_market_open_today() or not os.path.exists("signals.json"): return
+    if not is_market_open_today() or not os.path.exists("signals.json"): 
+        return
         
-    with open("signals.json", "r") as f: active_trades = json.load(f)
+    with open("signals.json", "r") as f: 
+        active_trades = json.load(f)
+        
     if os.path.exists("lesson_ledger.json"):
-        with open("lesson_ledger.json", "r") as f: memories = json.load(f)
-    else: memories = {"toxic_shapes": [], "stagnation_shapes": []}
-        
+        try:
+            with open("lesson_ledger.json", "r") as f: 
+                memories = json.load(f)
+
+            if not isinstance(memories,dict):
+                memories = {}
+        except (json.JSONDecodeError, OSError):
+            memories = {}
+    else: 
+        memories = {}
+    memories.setdefault("toxic_shapes", [])
+    memories.setdefault("stagnation_shapes", [])
+    
     for trade in active_trades:
         if trade["verdict"] == "REJECTED": continue
         ticker = trade["ticker"]
