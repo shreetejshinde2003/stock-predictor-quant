@@ -905,7 +905,7 @@
         "entry_price": 462.05,
         "target": 485.15,
         "stop_loss": 448.19,
-        "verdict": "BUY",
+        "verdict": "CLOSED (LOSS)",
         "reason": "Clean Algorithmic Setup",
         "shape": [
             1.095039818766537,
